@@ -73,6 +73,12 @@ Uploads the enriched NDJSON files to MongoDB collections.
 python Stage4-uploadToMongoDB.py
 ```
 
+Your resulting resources will look like this:
+
+![Resulting Resources](images/figure1.png "Resulting Resources Visualization")
+
+![Resulting Resources](images/figure2.png "Resulting Resources Visualization")
+
 ## Additional Notes
 
 - **Environment Variables**: Use a `.env` file at the project's root to store sensitive information:
