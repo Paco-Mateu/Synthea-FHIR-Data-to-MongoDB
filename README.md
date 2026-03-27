@@ -1,93 +1,231 @@
 # Synthea FHIR Data to MongoDB
 
-## Overview
+This project shows a production-shaped way to store Synthea FHIR data in MongoDB without losing the original FHIR resources.
 
-This project processes and enriches healthcare data extracted from the Synthea dataset, focusing on breast cancer patient records over a 10-year span. The workflow involves four main Python scripts that split JSON bundles into separate NDJSON files, update references, enrich metadata for better analysis and interoperability, and upload the enriched data to MongoDB. AI embeddings for selected fields are also generated and added as part of the metadata, enhancing the dataset's utility for semantic search and RAG (Retrieval-Augmented Generation) applications.
+The target model is:
 
-## Installation
+`FHIR bundle JSON -> canonical polymorphic NDJSON -> MongoDB single collection -> downstream search and analytics`
 
-### Prerequisites
+## Goal
 
-- Python 3.8 or higher
-- pip (Python package manager)
-- MongoDB server or cluster (local or cloud-based, such as MongoDB Atlas)
+Use one canonical MongoDB collection, `fhir_resources`, to store all FHIR resource types while preserving:
 
-### Steps
+- the full normalized FHIR `resource`
+- optional `rawResource` for archive-grade exports
+- cardinality-safe `searchIndex` arrays for FHIR-search-oriented querying
+- derived `compartments` metadata for fast patient and encounter scoped access
+- optional OpenAI embeddings only for configured narrative-heavy resource types
 
-1. Clone this repository to your local machine:
-   ```
-   git clone <repository-url>
-   ```
-2. Navigate into the cloned repository directory:
-   ```
-   cd path/to/cloned/repository
-   ```
-3. Install required Python libraries:
-   ```
-   pip install pymongo python-dotenv certifi openai
-   ```
+This repository is a best-practice storage and indexing pattern for FHIR on MongoDB. It is not a FHIR API server.
 
-## Dataset Preparation
+## Design Rules
 
-You'll need the Synthea dataset for approximately 2,000 patient records with 10 years of medical history to use this project.
+- One collection for all FHIR resources.
+- Keep `resourceType` as a first-class top-level field.
+- Preserve the logical FHIR `id`; do not rewrite resource ids.
+- Resolve bundle-local references into normalized `resource.reference` values without mutating the raw payload.
+- Model search projections as arrays so cardinality-N fields remain queryable.
+- Put FHIR-scope style metadata in `compartments` to avoid repeated cross-resource lookups.
+- Keep semantic helpers such as narrative summaries and embeddings outside the raw-truth contract.
 
-### Downloading and Extracting the Dataset
+## 4-Step Workflow
 
-1. Download the dataset zip file from [Synthea Dataset - Approx. 2,000 Patient Records](https://mitre.box.com/shared/static/13ypa62hpnnb3j67wdfmd4dd2tzzf18s.zip).
-2. Unzip the downloaded file.
-3. Move the extracted folder to the `Dataset` directory at the root of this project. Ensure the folder is named `originalResources`.
+### 1. Install and configure
 
-## Usage
-
-### Stage 1: Split Bundles and Map New References
-
-Splits JSON bundles into separate NDJSON files and maps new references.
-```
-python Stage1-splitBundlesAndMappingNewReferences.py
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Note that this process also generates a file named uuid_to_url_mapping.json which contains the mappings from the original uuid's to new generated urls. 
+`.env` supports:
 
-### Stage 2: Update References for All Resources
+- `MONGODB_CONNECTION_STRING`
+- `DATABASE`
+- `COLLECTION`
+- `OPENAI_API_KEY`
 
-Updates references within each resource after Stage 1 processing.
-```
-python Stage2-updateReferencesForAllResources.py
-```
+Default Mongo targets:
 
-### Stage 3: Enrich Metadata
+- database: `hc_fhir_synthea_r4_sep2019_canonical`
+- collection: `fhir_resources`
 
-Enriches metadata for each resource, adding AI embeddings for selected fields.
-```
-python Stage3-enrichMetadata.py
-```
-Note that you can adapt the metadata you need, as well the search parameters for each resource type.
-Additionaly you can setup which resource types contain unstructured data from which you would like to generate an AI embedding.
-Current code limits to 25 embeddings. Adjust this to your necessity, and OpenAI credits. 
+### 2. Download the official public Synthea FHIR archive
 
-### Uploading to MongoDB
-
-Uploads the enriched NDJSON files to MongoDB collections.
-
-```
-python Stage4-uploadToMongoDB.py
+```bash
+python download_fhir_sample_data.py
 ```
 
-Your resulting resources will look like this:
+This downloads the public Synthea FHIR R4 ZIP into `Dataset/downloads/` and extracts it into `Dataset/source_fhir_r4_sep2019/`.
 
-![Resulting Resources](images/figure1.png "Resulting Resources Visualization")
+If you already have another Synthea FHIR bundle directory, skip this step and point the builder at that directory with `--input-dir`.
 
-![Resulting Resources](images/figure2.png "Resulting Resources Visualization")
+### 3. Build the canonical polymorphic dataset
 
-## Additional Notes
+The default build is the runtime export used by downstream applications:
 
-- **Environment Variables**: Use a `.env` file at the project's root to store sensitive information:
-  ```
-  OPENAI_API_KEY="your_openai_api_key"
-  MONGODB_CONNECTION_STRING='your_mongodb_connection_string'
-  DATABASE='your_database_name'
+```bash
+python build_canonical_fhir_dataset.py
+```
 
+Default outputs:
 
-## Contributions
+- input directory: `Dataset/source_fhir_r4_sep2019/fhir`
+- output file: `Dataset/build/fhir_resources_runtime.ndjson`
+- manifest: `Dataset/build/fhir_resources_runtime.manifest.json`
 
-Contributions and suggestions are welcome! Please open an issue or pull request for any improvements or issues encountered.
+To create an archive-grade export that also keeps `rawResource`:
+
+```bash
+python build_canonical_fhir_dataset.py \
+  --output-file Dataset/build/fhir_resources_archive.ndjson \
+  --dataset-label synthea_fhir_r4_sep2019_archive \
+  --include-raw-resource
+```
+
+To enable OpenAI embeddings for configured resource types:
+
+```bash
+python build_canonical_fhir_dataset.py \
+  --env-file .env \
+  --enable-embeddings \
+  --embedding-model text-embedding-3-small \
+  --embedding-resource-types DiagnosticReport,DocumentReference \
+  --embedding-limit-per-type 25
+```
+
+### 4. Upload into the single canonical MongoDB collection
+
+```bash
+python upload_canonical_fhir_dataset.py --env-file .env
+```
+
+You can also point directly at another environment file:
+
+```bash
+python upload_canonical_fhir_dataset.py \
+  --env-file /path/to/project/.env \
+  --database hc_fhir_synthea_r4_sep2019_canonical \
+  --collection fhir_resources
+```
+
+The uploader uses:
+
+- fast `insert_many` on the first load
+- idempotent bulk upserts on later loads
+- canonical identity and search-oriented indexes
+
+## Canonical Document Model
+
+Each MongoDB document represents one FHIR resource and includes:
+
+- `datasetLabel`
+- `pipelineVersion`
+- `ingestedAt`
+- `resourceType`
+- `resourceId`
+- `logicalRef`
+- `resource`
+- optional `rawResource`
+- `searchIndex`
+- `compartments`
+- `source`
+- `hashes`
+- optional `narrative.summaryText`
+- optional `narrative.embedding`
+
+Example shape:
+
+```json
+{
+  "datasetLabel": "synthea_fhir_r4_sep2019_runtime",
+  "pipelineVersion": "2.0.0",
+  "resourceType": "Observation",
+  "resourceId": "obs-1",
+  "logicalRef": "Observation/obs-1",
+  "resource": {
+    "resourceType": "Observation",
+    "id": "obs-1",
+    "subject": { "reference": "Patient/patient-1" }
+  },
+  "searchIndex": {
+    "reference": [
+      {
+        "path": "subject.reference",
+        "value": "Patient/patient-1",
+        "targetType": "Patient",
+        "targetId": "patient-1"
+      }
+    ],
+    "token": [
+      {
+        "path": "status",
+        "code": "final"
+      }
+    ]
+  },
+  "compartments": {
+    "patientRefs": ["Patient/patient-1"]
+  }
+}
+```
+
+## Search-Friendly Shape
+
+The canonical documents are intentionally shaped so a future FHIR search compiler can query Mongo efficiently against a known dataset.
+
+Current `searchIndex` buckets:
+
+- `searchIndex.reference`
+- `searchIndex.token`
+- `searchIndex.string`
+- `searchIndex.date`
+- `searchIndex.quantity`
+- `searchIndex.number`
+
+Important details:
+
+- repeated codings, identifiers, references, and other cardinality-N values stay queryable
+- string values are stored with `valueNormalized` for case-insensitive matching
+- reference items carry both `targetType` and `targetId`
+- patient and encounter scope can be resolved through `compartments` instead of repeated joins
+
+## Indexing Strategy
+
+The uploader creates indexes aligned with the canonical search shape, including:
+
+- unique identity: `datasetLabel + logicalRef`
+- `datasetLabel + resourceType + resourceId`
+- `resourceType`
+- `logicalRef`
+- `resourceType + compartments.patientRefs`
+- `resourceType + compartments.encounterRefs`
+- `resourceType + searchIndex.reference.value`
+- `resourceType + searchIndex.reference.targetType + searchIndex.reference.targetId`
+- `resourceType + searchIndex.token.system + searchIndex.token.code`
+- `resourceType + searchIndex.token.code`
+- `resourceType + searchIndex.string.valueNormalized`
+- `resourceType + searchIndex.date.value`
+- `resourceType + searchIndex.quantity.code + searchIndex.quantity.value`
+- `resourceType + searchIndex.number.value`
+
+This is the recommended pattern in this repo: preserve the full resource for exchange, and add a stable query-optimized companion shape for search and analytics.
+
+## What This Demo Delivers
+
+- a single polymorphic MongoDB collection for all FHIR resource types
+- preserved FHIR resources ready for exchange or reprocessing
+- cardinality-safe search projections
+- derived compartment metadata for patient-scoped retrieval
+- optional narrative summaries and OpenAI embeddings for configured resource types
+- a strong foundation for downstream clinical applications such as longitudinal views, facts materialization, and trial matching
+
+## What This Demo Does Not Deliver
+
+- a FHIR REST API
+- full FHIR Search semantics or all search parameters
+- disease-specific clinical normalization
+- oncology eligibility logic
+
+Those are downstream layers. This repository’s responsibility is the canonical storage and indexing contract.

@@ -1,0 +1,4 @@
+certifi
+openai
+pymongo
+python-dotenv

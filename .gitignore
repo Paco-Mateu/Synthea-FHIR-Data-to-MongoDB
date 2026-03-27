@@ -1,2 +1,8 @@
 .env
 .DS_Store
+.venv/
+__pycache__/
+Dataset/build/
+Dataset/downloads/
+Dataset/source_fhir_r4_nov2021/
+Dataset/source_fhir_r4_sep2019/
